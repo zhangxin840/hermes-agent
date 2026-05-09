@@ -3386,6 +3386,34 @@ class TestGroupMentionAtAll(unittest.TestCase):
         allowed_sender = SimpleNamespace(open_id="ou_allowed", user_id=None)
         self.assertTrue(_admits_group(adapter, message, allowed_sender, ""))
 
+    @patch.dict(
+        os.environ,
+        {"FEISHU_GROUP_POLICY": "open", "FEISHU_BOT_NAME": "Hermes Bot"},
+        clear=True,
+    )
+    def test_at_all_can_be_disabled_for_direct_mention_only_profiles(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(
+            PlatformConfig(extra={"allow_at_all_as_mention": False})
+        )
+        sender_id = SimpleNamespace(open_id="ou_any", user_id=None)
+
+        at_all_message = SimpleNamespace(content='{"text":"@_all attention"}', mentions=[])
+        self.assertFalse(_admits_group(adapter, at_all_message, sender_id, ""))
+
+        direct_mention = SimpleNamespace(
+            content="{}",
+            mentions=[
+                SimpleNamespace(
+                    name="Hermes Bot",
+                    id=SimpleNamespace(open_id=None, user_id=None),
+                )
+            ],
+        )
+        self.assertTrue(_admits_group(adapter, direct_mention, sender_id, ""))
+
 
 @unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")
 class TestSenderNameResolution(unittest.TestCase):

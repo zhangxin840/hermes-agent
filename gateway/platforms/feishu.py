@@ -393,6 +393,7 @@ class FeishuAdapterSettings:
     group_rules: Dict[str, FeishuGroupRule] = field(default_factory=dict)
     allow_bots: str = "none"  # "none" | "mentions" | "all"
     require_mention: bool = True
+    allow_at_all_as_mention: bool = True
     reaction_in_progress: str = _FEISHU_REACTION_IN_PROGRESS
     reaction_failure: str = _FEISHU_REACTION_FAILURE
 
@@ -1540,6 +1541,12 @@ class FeishuAdapter(BasePlatformAdapter):
             require_mention=_to_boolean(
                 extra.get("require_mention", os.getenv("FEISHU_REQUIRE_MENTION", "true"))
             ),
+            allow_at_all_as_mention=_to_boolean(
+                extra.get(
+                    "allow_at_all_as_mention",
+                    os.getenv("FEISHU_ALLOW_AT_ALL_AS_MENTION", "true"),
+                )
+            ),
             reaction_in_progress=reaction_in_progress,
             reaction_failure=reaction_failure,
         )
@@ -1559,6 +1566,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._bot_open_id = settings.bot_open_id
         self._bot_user_id = settings.bot_user_id
         self._bot_name = settings.bot_name
+        self._allow_at_all_as_mention = settings.allow_at_all_as_mention
         self._dedup_cache_size = settings.dedup_cache_size
         self._text_batch_delay_seconds = settings.text_batch_delay_seconds
         self._text_batch_split_delay_seconds = settings.text_batch_split_delay_seconds
@@ -3863,7 +3871,7 @@ class FeishuAdapter(BasePlatformAdapter):
     def _mentions_self(self, message: Any) -> bool:
         # @_all is Feishu's @everyone placeholder.
         raw_content = getattr(message, "content", "") or ""
-        if "@_all" in raw_content:
+        if self._allow_at_all_as_mention and "@_all" in raw_content:
             return True
         mentions = getattr(message, "mentions", None) or []
         if mentions and self._message_mentions_bot(mentions):
