@@ -1004,6 +1004,7 @@ class GatewayRunner:
     _restart_task_started: bool = False
     _restart_detached: bool = False
     _restart_via_service: bool = False
+    _gateway_lifecycle_notifications: bool = True
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
@@ -1024,6 +1025,7 @@ class GatewayRunner:
         self._show_reasoning = self._load_show_reasoning()
         self._busy_input_mode = self._load_busy_input_mode()
         self._restart_drain_timeout = self._load_restart_drain_timeout()
+        self._gateway_lifecycle_notifications = self._load_gateway_lifecycle_notifications()
         self._provider_routing = self._load_provider_routing()
         self._fallback_model = self._load_fallback_model()
 
@@ -2092,6 +2094,25 @@ class GatewayRunner:
         return value
 
     @staticmethod
+    def _load_gateway_lifecycle_notifications() -> bool:
+        """Load whether restart/shutdown lifecycle notices should be sent to chats."""
+        raw = os.getenv("HERMES_GATEWAY_LIFECYCLE_NOTIFICATIONS", "").strip()
+        if raw:
+            return is_truthy_value(raw, default=True)
+        try:
+            import yaml as _y
+            cfg_path = _hermes_home / "config.yaml"
+            if cfg_path.exists():
+                with open(cfg_path, encoding="utf-8") as _f:
+                    cfg = _y.safe_load(_f) or {}
+                value = cfg_get(cfg, "display", "gateway_lifecycle_notifications")
+                if value is not None:
+                    return is_truthy_value(value, default=True)
+        except Exception:
+            pass
+        return True
+
+    @staticmethod
     def _load_background_notifications_mode() -> str:
         """Load background process notification mode from config or env var.
 
@@ -2404,6 +2425,10 @@ class GatewayRunner:
         messages can be delivered. Best-effort: individual send failures are
         logged and swallowed so they never block the shutdown sequence.
         """
+        if not self._gateway_lifecycle_notifications:
+            logger.info("Gateway lifecycle shutdown notifications suppressed by config")
+            return
+
         active = self._snapshot_running_agents()
 
         action = "restarting" if self._restart_requested else "shutting down"
@@ -3102,7 +3127,10 @@ class GatewayRunner:
         # /restart requester already received a direct completion notice in the
         # same chat, skip the generic broadcast there to avoid duplicates while
         # still allowing a home-channel fallback when the direct send fails.
-        if restart_notification_pending or delivered_restart_target is not None:
+        if (
+            self._gateway_lifecycle_notifications
+            and (restart_notification_pending or delivered_restart_target is not None)
+        ):
             skip_home_targets = (
                 {delivered_restart_target} if delivered_restart_target else None
             )
