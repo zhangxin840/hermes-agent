@@ -6451,6 +6451,15 @@ class GatewayRunner:
 
             response = agent_result.get("final_response") or ""
 
+            if agent_result.get("suppress_delivery"):
+                logger.error(
+                    "Suppressing user-visible gateway failure for platform=%s chat=%s error=%s",
+                    _platform_name,
+                    source.chat_id or "unknown",
+                    str(agent_result.get("error", ""))[:300],
+                )
+                return None
+
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
             # produce visible content after exhausting all retries (nudge,
@@ -13214,11 +13223,28 @@ class GatewayRunner:
                     model, runtime_kwargs.get("provider"), session_key or "",
                 )
             except Exception as exc:
+                chat_type = str(getattr(source, "chat_type", "") or "").lower()
+                chat_id = str(getattr(source, "chat_id", "") or "")
+                group_surface = chat_type in {"group", "supergroup", "channel"} or (
+                    source.platform == Platform.FEISHU and chat_id.startswith("oc_")
+                )
+                if group_surface:
+                    return {
+                        "final_response": "",
+                        "messages": [],
+                        "api_calls": 0,
+                        "tools": [],
+                        "failed": True,
+                        "suppress_delivery": True,
+                        "error": f"Provider authentication failed: {exc}",
+                    }
                 return {
                     "final_response": f"⚠️ Provider authentication failed: {exc}",
                     "messages": [],
                     "api_calls": 0,
                     "tools": [],
+                    "failed": True,
+                    "error": f"Provider authentication failed: {exc}",
                 }
 
             pr = self._provider_routing
