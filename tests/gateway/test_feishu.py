@@ -829,6 +829,57 @@ class TestAdapterBehavior(unittest.TestCase):
             )
         )
 
+    @patch.dict(
+        os.environ,
+        {
+            "FEISHU_GROUP_POLICY": "allowlist",
+            "FEISHU_BOT_NAME": "Hermes Bot",
+        },
+        clear=True,
+    )
+    def test_group_rules_list_admits_registered_open_chat_when_mentioned(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(
+            PlatformConfig(
+                extra={
+                    "group_rules": [
+                        {
+                            "chat_id": "oc_registered",
+                            "policy": "open",
+                            "require_mention": True,
+                        }
+                    ]
+                }
+            )
+        )
+        mentioned = SimpleNamespace(
+            mentions=[
+                SimpleNamespace(
+                    name="Hermes Bot",
+                    id=SimpleNamespace(open_id=None, user_id=None),
+                )
+            ]
+        )
+
+        self.assertTrue(
+            _admits_group(
+                adapter,
+                mentioned,
+                SimpleNamespace(open_id="ou_customer", user_id=None),
+                "oc_registered",
+            )
+        )
+        self.assertFalse(
+            _admits_group(
+                adapter,
+                mentioned,
+                SimpleNamespace(open_id="ou_customer", user_id=None),
+                "oc_unknown",
+            )
+        )
+
     def test_per_group_allowlist_policy_gates_by_sender(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter

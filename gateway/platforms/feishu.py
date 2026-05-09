@@ -1422,20 +1422,29 @@ class FeishuAdapter(BasePlatformAdapter):
         raw_group_rules = extra.get("group_rules", {})
         group_rules: Dict[str, FeishuGroupRule] = {}
         if isinstance(raw_group_rules, dict):
-            for chat_id, rule_cfg in raw_group_rules.items():
-                if not isinstance(rule_cfg, dict):
-                    continue
-                # Only override when the key is explicitly set — missing vs false
-                # must not collapse.
-                per_chat_require_mention: Optional[bool] = None
-                if "require_mention" in rule_cfg:
-                    per_chat_require_mention = _to_boolean(rule_cfg.get("require_mention"))
-                group_rules[str(chat_id)] = FeishuGroupRule(
-                    policy=str(rule_cfg.get("policy", "open")).strip().lower(),
-                    allowlist=set(str(u).strip() for u in rule_cfg.get("allowlist", []) if str(u).strip()),
-                    blacklist=set(str(u).strip() for u in rule_cfg.get("blacklist", []) if str(u).strip()),
-                    require_mention=per_chat_require_mention,
-                )
+            rule_items = raw_group_rules.items()
+        elif isinstance(raw_group_rules, list):
+            rule_items = (
+                (rule_cfg.get("chat_id"), rule_cfg)
+                for rule_cfg in raw_group_rules
+                if isinstance(rule_cfg, dict)
+            )
+        else:
+            rule_items = ()
+        for chat_id, rule_cfg in rule_items:
+            if not chat_id or not isinstance(rule_cfg, dict):
+                continue
+            # Only override when the key is explicitly set — missing vs false
+            # must not collapse.
+            per_chat_require_mention: Optional[bool] = None
+            if "require_mention" in rule_cfg:
+                per_chat_require_mention = _to_boolean(rule_cfg.get("require_mention"))
+            group_rules[str(chat_id)] = FeishuGroupRule(
+                policy=str(rule_cfg.get("policy", "open")).strip().lower(),
+                allowlist=set(str(u).strip() for u in rule_cfg.get("allowlist", []) if str(u).strip()),
+                blacklist=set(str(u).strip() for u in rule_cfg.get("blacklist", []) if str(u).strip()),
+                require_mention=per_chat_require_mention,
+            )
 
         # Bot-level admins
         raw_admins = extra.get("admins", [])

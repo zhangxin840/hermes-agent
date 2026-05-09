@@ -4415,6 +4415,8 @@ class GatewayRunner:
         }
         platform_group_chat_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_CHATS",
+            # Feishu historically uses the _USERS suffix for group chat IDs.
+            Platform.FEISHU: "FEISHU_GROUP_ALLOWED_USERS",
             Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
         }
         platform_allow_all_map = {
@@ -4490,8 +4492,59 @@ class GatewayRunner:
             group_user_allowlist = os.getenv(platform_group_user_env_map.get(source.platform, ""), "").strip()
             group_chat_allowlist = os.getenv(platform_group_chat_env_map.get(source.platform, ""), "").strip()
         global_allowlist = os.getenv("GATEWAY_ALLOWED_USERS", "").strip()
+        config_group_chat_ids: set[str] = set()
+        if source.chat_type in {"group", "forum"} and source.chat_id:
+            config = getattr(self, "config", None)
+            platform_cfg = None
+            if config and hasattr(config, "platforms"):
+                platform_cfg = config.platforms.get(source.platform)
+            extra = getattr(platform_cfg, "extra", {}) if platform_cfg else {}
+            if isinstance(extra, dict):
+                raw_group_chats = (
+                    extra.get("group_allowed_chats")
+                    or extra.get("allowed_group_chats")
+                    or extra.get("group_allow_chats")
+                )
+                if isinstance(raw_group_chats, str):
+                    config_group_chat_ids.update(
+                        chat_id.strip()
+                        for chat_id in raw_group_chats.split(",")
+                        if chat_id.strip()
+                    )
+                elif isinstance(raw_group_chats, (list, tuple, set)):
+                    config_group_chat_ids.update(
+                        str(chat_id).strip()
+                        for chat_id in raw_group_chats
+                        if str(chat_id).strip()
+                    )
 
-        if not platform_allowlist and not group_user_allowlist and not group_chat_allowlist and not global_allowlist:
+                # Feishu group_rules are the canonical chat allowlist for
+                # customer-facing profiles. The adapter handles message-level
+                # policy and mention gating; the gateway auth layer must still
+                # admit registered group traffic before a response can be
+                # produced.
+                if source.platform == Platform.FEISHU:
+                    raw_group_rules = extra.get("group_rules")
+                    if isinstance(raw_group_rules, dict):
+                        config_group_chat_ids.update(
+                            str(chat_id).strip()
+                            for chat_id in raw_group_rules.keys()
+                            if str(chat_id).strip()
+                        )
+                    elif isinstance(raw_group_rules, list):
+                        config_group_chat_ids.update(
+                            str(rule.get("chat_id", "")).strip()
+                            for rule in raw_group_rules
+                            if isinstance(rule, dict) and str(rule.get("chat_id", "")).strip()
+                        )
+
+        if (
+            not platform_allowlist
+            and not group_user_allowlist
+            and not group_chat_allowlist
+            and not config_group_chat_ids
+            and not global_allowlist
+        ):
             # No allowlists configured -- check global allow-all flag
             return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in ("true", "1", "yes")
 
@@ -4503,6 +4556,9 @@ class GatewayRunner:
                 chat_id.strip() for chat_id in group_chat_allowlist.split(",") if chat_id.strip()
             }
             if "*" in allowed_group_ids or source.chat_id in allowed_group_ids:
+                return True
+        if config_group_chat_ids and source.chat_type in {"group", "forum"} and source.chat_id:
+            if "*" in config_group_chat_ids or source.chat_id in config_group_chat_ids:
                 return True
 
         # Backward-compat shim for #15027: prior to PR #17686,
@@ -4622,6 +4678,7 @@ class GatewayRunner:
                 Platform.QQBOT:    "QQ_ALLOWED_USERS",
             }
             platform_group_env_map = {
+                Platform.FEISHU: ("FEISHU_GROUP_ALLOWED_USERS",),
                 Platform.TELEGRAM: (
                     "TELEGRAM_GROUP_ALLOWED_USERS",
                     "TELEGRAM_GROUP_ALLOWED_CHATS",
