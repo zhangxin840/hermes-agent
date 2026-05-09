@@ -363,9 +363,29 @@ Plain text messages (no markdown detected) are sent as the simple `text` message
 
 ## Processing Status Reactions
 
-While the agent is working, the bot shows a `Typing` reaction on your message. It's cleared when the reply arrives, or replaced with `CrossMark` if processing failed.
+While the agent is working, the bot shows a reaction on your message. By default this is `Typing`. It's cleared when the reply arrives, or replaced with `CrossMark` if processing failed.
 
 Set `FEISHU_REACTIONS=false` to turn it off.
+
+Reaction names use Feishu's `emoji_type` values, the same value passed to the
+Open Platform message reaction API. For example, the Feishu headset emoji (🎧)
+is `HEADSET`:
+
+```yaml
+platforms:
+  feishu:
+    extra:
+      reactions:
+        in_progress: HEADSET
+        failure: CrossMark
+```
+
+You can also set the same values from the environment:
+
+```bash
+FEISHU_REACTION_IN_PROGRESS=HEADSET
+FEISHU_REACTION_FAILURE=CrossMark
+```
 
 ## Burst Protection and Batching
 

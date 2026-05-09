@@ -8,8 +8,8 @@ Supports:
 - Gateway allowlist integration via FEISHU_ALLOWED_USERS
 - Persistent dedup state across restarts
 - Per-chat serial message processing (matches openclaw createChatQueue)
-- Processing status reactions: Typing while working, removed on success,
-  swapped for CrossMark on failure
+- Processing status reactions: configurable emoji while working, removed on
+  success, swapped for a failure emoji on failure
 - Reaction events routed as synthetic text events (matches openclaw)
 - Interactive card button-click events routed as synthetic COMMAND events
 - Webhook anomaly tracking (matches openclaw createWebhookAnomalyTracker)
@@ -393,6 +393,8 @@ class FeishuAdapterSettings:
     group_rules: Dict[str, FeishuGroupRule] = field(default_factory=dict)
     allow_bots: str = "none"  # "none" | "mentions" | "all"
     require_mention: bool = True
+    reaction_in_progress: str = _FEISHU_REACTION_IN_PROGRESS
+    reaction_failure: str = _FEISHU_REACTION_FAILURE
 
 
 @dataclass
@@ -539,6 +541,11 @@ def _coerce_int(value: Any, default: Optional[int] = None, min_value: int = 0) -
 def _coerce_required_int(value: Any, default: int, min_value: int = 0) -> int:
     parsed = _coerce_int(value, default=default, min_value=min_value)
     return default if parsed is None else parsed
+
+
+def _coerce_non_empty_str(value: Any, default: str) -> str:
+    text = str(value or "").strip()
+    return text or default
 
 
 # ---------------------------------------------------------------------------
@@ -1447,6 +1454,23 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             allow_bots = "none"
 
+        raw_reactions = extra.get("reactions", {})
+        reaction_cfg = raw_reactions if isinstance(raw_reactions, dict) else {}
+        reaction_in_progress = _coerce_non_empty_str(
+            reaction_cfg.get("in_progress")
+            or reaction_cfg.get("ack")
+            or extra.get("reaction_in_progress")
+            or os.getenv("FEISHU_REACTION_IN_PROGRESS")
+            or os.getenv("FEISHU_ACK_REACTION"),
+            _FEISHU_REACTION_IN_PROGRESS,
+        )
+        reaction_failure = _coerce_non_empty_str(
+            reaction_cfg.get("failure")
+            or extra.get("reaction_failure")
+            or os.getenv("FEISHU_REACTION_FAILURE"),
+            _FEISHU_REACTION_FAILURE,
+        )
+
         return FeishuAdapterSettings(
             app_id=str(extra.get("app_id") or os.getenv("FEISHU_APP_ID", "")).strip(),
             app_secret=str(extra.get("app_secret") or os.getenv("FEISHU_APP_SECRET", "")).strip(),
@@ -1507,6 +1531,8 @@ class FeishuAdapter(BasePlatformAdapter):
             require_mention=_to_boolean(
                 extra.get("require_mention", os.getenv("FEISHU_REQUIRE_MENTION", "true"))
             ),
+            reaction_in_progress=reaction_in_progress,
+            reaction_failure=reaction_failure,
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -1539,6 +1565,8 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws_ping_timeout = settings.ws_ping_timeout
         self._allow_bots = settings.allow_bots
         self._require_mention = settings.require_mention
+        self._reaction_in_progress = settings.reaction_in_progress
+        self._reaction_failure = settings.reaction_failure
 
     def _build_event_handler(self) -> Any:
         if EventDispatcherHandler is None:
@@ -2586,7 +2614,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
     async def _add_reaction(self, message_id: str, emoji_type: str) -> Optional[str]:
         """Return the reaction_id on success, else None. The id is needed later for deletion."""
-        if not self._client or not message_id or not emoji_type:
+        if not getattr(self, "_client", None) or not message_id or not emoji_type:
             return None
         try:
             from lark_oapi.api.im.v1 import (
@@ -2670,7 +2698,7 @@ class FeishuAdapter(BasePlatformAdapter):
         message_id = event.message_id
         if not message_id or message_id in self._pending_processing_reactions:
             return
-        reaction_id = await self._add_reaction(message_id, _FEISHU_REACTION_IN_PROGRESS)
+        reaction_id = await self._add_reaction(message_id, self._reaction_in_progress)
         if reaction_id:
             self._remember_processing_reaction(message_id, reaction_id)
 
@@ -2686,14 +2714,14 @@ class FeishuAdapter(BasePlatformAdapter):
         start_reaction_id = self._pending_processing_reactions.get(message_id)
         if start_reaction_id:
             if not await self._remove_reaction(message_id, start_reaction_id):
-                # Don't stack a second badge on top of a Typing we couldn't
+                # Don't stack a second badge on top of the working reaction we couldn't
                 # remove — UI would read as both "working" and "done/failed"
                 # simultaneously. Keep the handle so LRU eventually evicts it.
                 return
             self._pop_processing_reaction(message_id)
 
         if outcome is ProcessingOutcome.FAILURE:
-            await self._add_reaction(message_id, _FEISHU_REACTION_FAILURE)
+            await self._add_reaction(message_id, self._reaction_failure)
 
     # =========================================================================
     # Webhook server and security
@@ -2750,8 +2778,20 @@ class FeishuAdapter(BasePlatformAdapter):
             if text.startswith("/"):
                 inbound_type = MessageType.COMMAND
 
-        # Guard runs post-strip so a pure "@Bot" message (stripped to "") is dropped.
+        # Guard runs post-strip; a pure "@Bot" group message is usually a
+        # liveness probe, so acknowledge with a lightweight reaction instead of
+        # posting a visible group message.
         if inbound_type == MessageType.TEXT and not text and not media_urls:
+            if chat_type != "p2p" and any(ref.is_self for ref in mentions):
+                if message_id and self._reactions_enabled():
+                    reaction = getattr(
+                        self,
+                        "_reaction_in_progress",
+                        _FEISHU_REACTION_IN_PROGRESS,
+                    )
+                    await self._add_reaction(message_id, reaction)
+                logger.info("[Feishu] Acknowledged pure @mention with reaction id=%s", message_id)
+                return
             logger.debug("[Feishu] Ignoring empty text message id=%s", message_id)
             return
 

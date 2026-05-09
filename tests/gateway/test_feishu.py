@@ -1462,6 +1462,51 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertEqual(event.text, "/help test")
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_process_inbound_group_pure_bot_mention_acknowledges_without_dispatch(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.base import MessageType
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._bot_name = "Klaasje"
+        adapter._extract_message_content = AsyncMock(
+            return_value=(
+                "",
+                MessageType.TEXT,
+                [],
+                [],
+                [SimpleNamespace(is_self=True)],
+            )
+        )
+        adapter._dispatch_inbound_event = AsyncMock()
+        adapter.send = AsyncMock()
+        adapter._add_reaction = AsyncMock(return_value="r_ack")
+        message = SimpleNamespace(
+            chat_id="oc_group",
+            thread_id=None,
+            parent_id=None,
+            upper_message_id=None,
+            message_type="text",
+            content='{"text":"@Klaasje"}',
+            message_id="om_pure_mention",
+        )
+
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=SimpleNamespace(event=SimpleNamespace(message=message)),
+                message=message,
+                sender_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+                is_bot=False,
+                chat_type="group",
+                message_id="om_pure_mention",
+            )
+        )
+
+        adapter._add_reaction.assert_awaited_once_with("om_pure_mention", "Typing")
+        adapter.send.assert_not_awaited()
+        adapter._dispatch_inbound_event.assert_not_awaited()
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_extract_text_file_injects_content(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
@@ -3528,6 +3573,50 @@ class TestBotNameResolution(unittest.TestCase):
         self.assertNotIn("ou_peer", adapter._sender_name_cache)
 
 
+class TestProcessingReactionConfig(unittest.TestCase):
+    @staticmethod
+    def _event(message_id: str = "om_msg"):
+        return SimpleNamespace(message_id=message_id)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_config_reaction_type_used_by_start_hook(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(
+            PlatformConfig(extra={"reactions": {"in_progress": "HEADSET"}})
+        )
+        adapter._add_reaction = AsyncMock(return_value="r_headset")
+
+        asyncio.run(adapter.on_processing_start(self._event()))
+
+        adapter._add_reaction.assert_awaited_once_with("om_msg", "HEADSET")
+        self.assertEqual(adapter._pending_processing_reactions["om_msg"], "r_headset")
+
+    @patch.dict(
+        os.environ,
+        {
+            "FEISHU_REACTION_IN_PROGRESS": "HEADSET",
+            "FEISHU_REACTION_FAILURE": "Alarm",
+        },
+        clear=True,
+    )
+    def test_env_reaction_types_used_by_hooks(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._add_reaction = AsyncMock(return_value="r_headset")
+        adapter._remove_reaction = AsyncMock(return_value=True)
+
+        asyncio.run(adapter.on_processing_start(self._event()))
+        asyncio.run(adapter.on_processing_complete(self._event(), ProcessingOutcome.FAILURE))
+
+        adapter._add_reaction.assert_any_await("om_msg", "HEADSET")
+        adapter._add_reaction.assert_any_await("om_msg", "Alarm")
+        adapter._remove_reaction.assert_awaited_once_with("om_msg", "r_headset")
+
+
 @unittest.skipUnless(_HAS_LARK_OAPI, "lark-oapi not installed")
 class TestProcessingReactions(unittest.TestCase):
     """Typing on start → removed on SUCCESS, swapped for CrossMark on FAILURE,
@@ -3542,11 +3631,12 @@ class TestProcessingReactions(unittest.TestCase):
         create_success: bool = True,
         delete_success: bool = True,
         next_reaction_id: str = "r1",
+        config_extra: dict | None = None,
     ):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
+        adapter = FeishuAdapter(PlatformConfig(extra=config_extra or {}))
         tracker = SimpleNamespace(
             create_calls=[],
             delete_calls=[],
@@ -3603,6 +3693,34 @@ class TestProcessingReactions(unittest.TestCase):
             self._run(adapter.on_processing_start(self._event()))
         self.assertEqual(tracker.create_calls, ["Typing"])
         self.assertEqual(adapter._pending_processing_reactions["om_msg"], "r_typing")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_config_overrides_working_reaction(self):
+        adapter, tracker = self._build_adapter(
+            next_reaction_id="r_headset",
+            config_extra={"reactions": {"in_progress": "HEADSET"}},
+        )
+        with self._patch_to_thread():
+            self._run(adapter.on_processing_start(self._event()))
+        self.assertEqual(tracker.create_calls, ["HEADSET"])
+        self.assertEqual(adapter._pending_processing_reactions["om_msg"], "r_headset")
+
+    @patch.dict(
+        os.environ,
+        {
+            "FEISHU_REACTION_IN_PROGRESS": "HEADSET",
+            "FEISHU_REACTION_FAILURE": "Alarm",
+        },
+        clear=True,
+    )
+    def test_env_overrides_reaction_types(self):
+        adapter, tracker = self._build_adapter(next_reaction_id="r_headset")
+        with self._patch_to_thread():
+            self._run(adapter.on_processing_start(self._event()))
+            self._run(
+                adapter.on_processing_complete(self._event(), ProcessingOutcome.FAILURE)
+            )
+        self.assertEqual(tracker.create_calls, ["HEADSET", "Alarm"])
 
     @patch.dict(os.environ, {}, clear=True)
     def test_start_is_idempotent_for_same_message_id(self):
